@@ -1,0 +1,30 @@
+# ---- Conda / virtual envs ----
+.conda/
+venv/
+env/
+*.egg-info/
+
+# ---- Third-party SDKs (obtain separately, see README) ----
+Spline/fairino390/
+examples/
+
+# ---- Python cache ----
+__pycache__/
+*.py[cod]
+*.so
+
+# ---- Runtime data / logs ----
+logs/
+trajectories/
+datasets/
+*.log
+*.csv
+
+# ---- Internal / not for publication ----
+项目报告.md
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+*.swp

@@ -1,0 +1,29 @@
+import sys
+from alicia_d_sdk import create_robot
+
+# 手动指定串口（根据操作系统自动选择）
+if sys.platform.startswith("win"):
+    port = "COM3"
+else:
+    port = "/dev/ttyACM0"
+
+robot = create_robot(port=port)
+
+# 检查连接状态
+if robot.is_connected():
+    print("连接成功！")
+
+    # 打印当前状态
+    robot.print_state()
+
+    # 断开连接
+    robot.disconnect()
+else:
+    print("连接失败，请检查串口")
+    
+"""# 手动控制连接
+robot = create_robot(auto_connect=False)
+if robot.connect():
+    # 使用机器人
+    robot.print_state()
+    robot.disconnect()"""
