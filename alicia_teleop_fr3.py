@@ -110,7 +110,7 @@ SPRING_OMEGA         = 20.0            # 弹簧阻尼固有频率 ωn (rad/s)，
 MAX_ACCEL            = 800.0            # 关节最大加速度 (°/s²)，抑制暴力加速，200~800（标准值：500）
 MAX_VEL              =150           # 关节最大速度 (°/s)，安全兜底，60~100 （标准值：60）
 PREDICT_ENABLED       = True   # 是否启用前瞻预测（接在滤波+弹簧之后，对干净的弹簧速度做线性外推，抵消上游延迟）
-PREDICT_LOOKAHEAD_MS  = 50.0   # 前瞻时长 (ms)。从小值开始测试，逐步上调，若出现超调/震颤则调小
+PREDICT_LOOKAHEAD_MS  = 10.0   # 前瞻时长 (ms)。从小值开始测试，逐步上调，若出现超调/震颤则调小
 
 # ---- FR3 关节限位 (°) ----
 MIN_ANGLE            = [-170, -265, -145, -265, -170, -355]
@@ -131,25 +131,16 @@ GRIPPER_OPEN_Q       = 2.5       # 从臂全开对应角度 [rad]（占位，需
 GRIPPER_CLOSE_Q      = 0.0       # 从臂全合对应角度 [rad]（占位，需标定）
 
 # ---- 夹爪力/电流限制（MIT 力矩模式核心参数，详见 gripper_teleop.py 里的标定说明）----
-GRIPPER_TAU_MAX      = 0.75       # 最大闭合/张开扭矩 [Nm]，需按电源电流表边测边调
+GRIPPER_TAU_MAX      = 0.75      # 最大闭合/张开扭矩 [Nm]，需按电源电流表边测边调
 GRIPPER_STIFFNESS    = 6.0       # 虚拟弹簧刚度 [Nm/rad]
 GRIPPER_KD           = 0.15      # MIT 阻尼 [Nm·s/rad]
 
 # ---- 夹爪原始值(0~1000)缩放系数 ----
 # 主臂扳机被当成"J7"跟 6 个关节角度(单位:度)一起走同一套 OneEuro/固定低通滤波，
 # 但扳机原始量程 0~1000 比关节角度(几十度量级)大得多；除以这个系数把它压缩到
-# 相近的数量级，滤波之后再乘回去还原成 0~1000 量程。
+# 相近的数量级，这样两个滤波器共用的 mincutoff/beta/tremor-cutoff 才有意义，
+# 滤波之后再乘回去还原成 0~1000 量程。
 GRIPPER_RAW_SCALE    = 100.0
-
-# ---- 夹爪专用滤波截止频率 ----
-# OneEuro/固定低通是按"关节数组"实现的（每个元素独立维护自己的滤波状态），
-# mincutoff/beta/cutoff_hz 允许每个元素给不同的值——这里第 7 个元素(夹爪)
-# 单独给一组更高(更松)的截止频率，避免直接照搬手臂那套抑制震颤用的低截止
-# 频率(3~5Hz)，那是为手部微颤调的，用在夹爪扳机上只会平白增加跟随延迟、
-# 让夹爪看起来"变慢"。夹爪本身的柔顺/防抖已经由 MIT 虚拟弹簧+kd 阻尼负责。
-GRIPPER_FILTER_MINCUTOFF = 30.0   # 夹爪专用 OneEuro 截止频率 (Hz)，比手臂默认值高很多=响应更快
-GRIPPER_FILTER_BETA      = 0.1    # 夹爪专用 OneEuro 速度自适应系数
-GRIPPER_TREMOR_CUTOFF    = 15.0   # 夹爪专用固定低通截止频率 (Hz)
 
 # ---- 夹爪 MIT 协议编码范围（tau 实际上限由 GRIPPER_TAU_MAX 控制）----
 GRIPPER_LIMITS_PMAX  = 3.14
@@ -335,23 +326,14 @@ class AliciaTeleopFR3:
         mincutoff = getattr(args, "filter_mincutoff", FILTER_MINCUTOFF)
         beta = getattr(args, "filter_beta", FILTER_BETA)
         tremor_cutoff = getattr(args, "tremor_cutoff", TREMOR_CUTOFF)
-        gripper_mincutoff = getattr(args, "gripper_filter_mincutoff", GRIPPER_FILTER_MINCUTOFF)
-        gripper_beta = getattr(args, "gripper_filter_beta", GRIPPER_FILTER_BETA)
-        gripper_tremor_cutoff = getattr(args, "gripper_tremor_cutoff", GRIPPER_TREMOR_CUTOFF)
-        # 每个元素的滤波状态相互独立，mincutoff/beta/cutoff_hz 支持按元素给
-        # 不同的值：前 6 个用手臂的截止频率（抑制手部震颤），第 7 个(夹爪)
-        # 用更高的截止频率（响应更快，见 GRIPPER_FILTER_MINCUTOFF 注释）。
-        mincutoff_vec = np.array([mincutoff] * 6 + [gripper_mincutoff])
-        beta_vec = np.array([beta] * 6 + [gripper_beta])
-        tremor_cutoff_vec = np.array([tremor_cutoff] * 6 + [gripper_tremor_cutoff])
         # 第一级：OneEuro（自适应，保留跟手性）。n_joints=7：6 个机械臂关节
         # + 1 个夹爪扳机（当成"J7"跟关节角度共用同一套滤波流水线）。
         self._leader_filter: OneEuroFilter | None = (
-            OneEuroFilter(n_joints=7, mincutoff=mincutoff_vec, beta=beta_vec) if use_filter else None
+            OneEuroFilter(n_joints=7, mincutoff=mincutoff, beta=beta) if use_filter else None
         )
         # 第二级：固定低通（截断震颤频段，不受运动速度影响）
         self._tremor_filter: LowPassFilter | None = (
-            LowPassFilter(n_joints=7, cutoff_hz=tremor_cutoff_vec) if use_filter else None
+            LowPassFilter(n_joints=7, cutoff_hz=tremor_cutoff) if use_filter else None
         )
 
         self.fr3_init_angles = np.zeros(6)
@@ -961,12 +943,6 @@ if __name__ == "__main__":
                          help="OneEuro 速度自适应系数。0=恒定滤波；>0 时运动越快滤波越弱响应越快，推荐范围 0.02~0.1")
     parser.add_argument("--tremor-cutoff", type=float, default=TREMOR_CUTOFF,
                          help="第二级固定低通截止频率 (Hz)，专门截断手部震颤（8~12 Hz），推荐范围 2~5 Hz")
-    parser.add_argument("--gripper-filter-mincutoff", type=float, default=GRIPPER_FILTER_MINCUTOFF,
-                         help="夹爪('J7')专用 OneEuro 截止频率 (Hz)。默认比手臂高很多，避免抑震颤参数拖慢夹爪响应")
-    parser.add_argument("--gripper-filter-beta", type=float, default=GRIPPER_FILTER_BETA,
-                         help="夹爪('J7')专用 OneEuro 速度自适应系数")
-    parser.add_argument("--gripper-tremor-cutoff", type=float, default=GRIPPER_TREMOR_CUTOFF,
-                         help="夹爪('J7')专用固定低通截止频率 (Hz)")
     parser.add_argument("--spring-omega", type=float, default=SPRING_OMEGA,
                          help="弹簧阻尼固有频率 ωn (rad/s)。越大跟随越快越跟手，越小启停越柔和，推荐范围 8~20")
     parser.add_argument("--max-accel", type=float, default=MAX_ACCEL,
@@ -1029,9 +1005,6 @@ if __name__ == "__main__":
         print(f"  从臂夹爪:      {args.gripper_port}  "
               f"tau_max=±{args.gripper_tau_max:.2f}Nm  stiffness={args.gripper_stiffness:.1f}Nm/rad  "
               f"kd={args.gripper_kd:.2f}")
-        if not args.no_filter:
-            print(f"                 夹爪('J7')滤波: mincutoff={args.gripper_filter_mincutoff} Hz  "
-                  f"beta={args.gripper_filter_beta}  tremor_cutoff={args.gripper_tremor_cutoff} Hz")
     print("-" * 60)
 
     teleop = AliciaTeleopFR3(
