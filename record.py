@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
-"""主臂轨迹录制工具（单条 / 多集数据集）。
+"""主臂轨迹录制工具（单条 / 多集数据集 / 轨迹分析）。
 
 合并自：leader_arm_stream.py、record_trajectory.py、collect_dataset.py
 
 子命令：
-  single   录制一条轨迹到 CSV
-  dataset  循环录制多条 episode，自动维护 dataset_index.csv
+  single    录制一条轨迹到 CSV
+  dataset   循环录制多条 episode，自动维护 dataset_index.csv
+  analyze   统计已录制轨迹中"非匀速"（加减速/变向）片段占比
 
 使用示例：
   python record.py single --output trajectories/demo_001.csv
   python record.py single --duration 10
   python record.py dataset --session pick_and_place
   python record.py dataset --session pick_and_place --num_episodes 20 --episode_duration 8
+  python record.py analyze trajectories/demo_001.csv
+  python record.py analyze datasets/pick_and_place
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import math
 import os
 import threading
 import time
 from dataclasses import dataclass
 from queue import Full, Queue
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from alicia_d_sdk import create_robot
 from alicia_d_sdk.utils import precise_sleep
@@ -291,6 +297,107 @@ def cmd_dataset(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 轨迹分析：统计非匀速（加减速/变向）片段占比
+# ---------------------------------------------------------------------------
+
+def _load_trajectory_csv(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """读取 record.py 输出的 CSV 轨迹，返回 (timestamps[N], angles[N,6])（角度单位统一为度）。"""
+    metadata: Dict[str, str] = {}
+    data_lines: List[str] = []
+    with open(path, newline="") as f:
+        for line in f:
+            if line.startswith("#"):
+                if ":" in line:
+                    key, _, val = line[1:].partition(":")
+                    metadata[key.strip()] = val.strip()
+            else:
+                data_lines.append(line)
+
+    reader = csv.DictReader(data_lines)
+    timestamps: List[float] = []
+    angles: List[List[float]] = []
+    for row in reader:
+        timestamps.append(float(row["timestamp"]))
+        angles.append([float(row[f"joint_{i}"]) for i in range(1, 7)])
+
+    ts = np.array(timestamps, dtype=float)
+    ang = np.array(angles, dtype=float)
+    if metadata.get("angle_format", "deg") == "rad":
+        ang = np.degrees(ang)
+    return ts, ang
+
+
+def _velocity_and_accel(timestamps: np.ndarray, angles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """逐关节计算速度(°/s)和加速度(°/s²)。返回的 accel 已与 vel 对齐（两者行数相同）。"""
+    dt = np.diff(timestamps)
+    dt[dt <= 0] = np.nan  # 时间戳异常（重复/回退）时不参与计算，避免除零或负延时
+    vel = np.diff(angles, axis=0) / dt[:, None]        # shape (N-1, 6)
+    accel = np.diff(vel, axis=0) / dt[1:, None]        # shape (N-2, 6)
+    return vel[1:], accel                              # vel 对齐到 accel（去掉首帧）
+
+
+def cmd_analyze(args: argparse.Namespace) -> None:
+    paths: List[str] = []
+    for p in args.paths:
+        if os.path.isdir(p):
+            paths.extend(sorted(glob.glob(os.path.join(p, "*.csv"))))
+        else:
+            paths.append(p)
+    paths = [p for p in paths if os.path.basename(p) != "dataset_index.csv"]
+
+    if not paths:
+        print("✗ 未找到可分析的 CSV 文件")
+        return
+
+    print(f"分析 {len(paths)} 个文件  "
+          f"(motion_threshold={args.motion_threshold}°/s, accel_threshold={args.accel_threshold}°/s²)")
+    print("-" * 68)
+
+    per_joint_moving = np.zeros(6, dtype=np.int64)
+    per_joint_nonuniform = np.zeros(6, dtype=np.int64)
+    total_duration = 0.0
+    total_samples = 0
+    skipped = 0
+
+    for path in paths:
+        try:
+            timestamps, angles = _load_trajectory_csv(path)
+        except Exception as e:
+            print(f"  ✗ 跳过 {path}（读取失败: {e}）")
+            skipped += 1
+            continue
+        if len(timestamps) < 4:
+            skipped += 1
+            continue
+
+        vel, accel = _velocity_and_accel(timestamps, angles)
+        moving = np.abs(vel) > args.motion_threshold
+        nonuniform = moving & (np.abs(accel) > args.accel_threshold)
+
+        per_joint_moving += moving.sum(axis=0)
+        per_joint_nonuniform += nonuniform.sum(axis=0)
+        total_duration += timestamps[-1] - timestamps[0]
+        total_samples += len(timestamps)
+
+    if skipped:
+        print(f"（{skipped} 个文件因数据不足或读取失败被跳过）")
+
+    print(f"{'关节':<6}{'运动帧数':>10}{'非匀速帧数':>12}{'非匀速占比':>12}")
+    for i in range(6):
+        moving_i = int(per_joint_moving[i])
+        pct = (per_joint_nonuniform[i] / moving_i * 100.0) if moving_i > 0 else 0.0
+        print(f"J{i + 1:<5}{moving_i:>10d}{int(per_joint_nonuniform[i]):>12d}{pct:>11.1f}%")
+
+    total_moving = int(per_joint_moving.sum())
+    total_nonuniform = int(per_joint_nonuniform.sum())
+    overall_pct = (total_nonuniform / total_moving * 100.0) if total_moving > 0 else 0.0
+
+    print("-" * 68)
+    print(f"总时长: {total_duration:.1f}s   总采样点: {total_samples}")
+    print(f"整体非匀速片段占比（跨6关节汇总）: {overall_pct:.1f}%")
+
+
+# ---------------------------------------------------------------------------
 # CLI 入口
 # ---------------------------------------------------------------------------
 
@@ -325,11 +432,21 @@ def main() -> None:
     p_dataset.add_argument("--episode_duration", type=float, default=None,
                            help="每条 episode 的录制时长（秒），不指定则手动按 Enter 开始/结束")
 
+    # analyze 子命令
+    p_analyze = sub.add_parser("analyze", help="统计已录制轨迹中非匀速(加减速/变向)片段占比")
+    p_analyze.add_argument("paths", nargs="+", help="CSV 文件或目录路径（可多个，目录会递归找 *.csv）")
+    p_analyze.add_argument("--motion-threshold", type=float, default=2.0,
+                           help="判定\"正在运动\"的最小速度阈值 (°/s)，低于此值视为静止/噪声，不计入统计")
+    p_analyze.add_argument("--accel-threshold", type=float, default=200.0,
+                           help="判定\"非匀速\"的加速度阈值 (°/s²)，超过此值视为加减速/变向")
+
     args = parser.parse_args()
     if args.cmd == "single":
         cmd_single(args)
-    else:
+    elif args.cmd == "dataset":
         cmd_dataset(args)
+    else:
+        cmd_analyze(args)
 
 
 if __name__ == "__main__":
