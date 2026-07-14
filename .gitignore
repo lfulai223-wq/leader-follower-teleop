@@ -7,6 +7,7 @@ env/
 # ---- Third-party SDKs (obtain separately, see README) ----
 Spline/fairino390/
 examples/
+Gloria-M-SDK/
 
 # ---- Python cache ----
 __pycache__/
@@ -21,10 +22,15 @@ datasets/
 *.csv
 
 # ---- Internal / not for publication ----
-项目报告.md
+项目报告*.md
+遥操报告*.md
 
 # ---- Editor / OS ----
 .vscode/
 .idea/
 .DS_Store
 *.swp
+
+# ---- Personal / unintended files ----
+*.docx
+.~lock.*#
