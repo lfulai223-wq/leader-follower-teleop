@@ -17,12 +17,10 @@ easy to port.
 ## 🎥 Demo
 
 **Follower tracking** — the follower mirrors the leader's motion in real time:
-
-<video src="遥操作跟手展示.mp4" controls width="480"></video>
+[▶ Watch video](遥操作跟手展示.mp4)
 
 **Gripper grasping** — teleoperated pick using the gripper channel:
-
-<video src="遥操作抓取.mp4" controls width="480"></video>
+[▶ Watch video](遥操作抓取.mp4)
 
 ---
 
